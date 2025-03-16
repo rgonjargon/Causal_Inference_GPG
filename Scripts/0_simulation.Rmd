@@ -1,0 +1,293 @@
+---
+title: "Hierarchical organisation simulation"
+author: "Dr Tom Moore - Statistical Scientist"
+date:  '`r Sys.Date()`'
+knit: (function(inputFile, encoding) { out_dir <- "Reports";
+      rmarkdown::render(inputFile, encoding=encoding, output_file=file.path(dirname(inputFile),
+      out_dir, 'Analysis_Report_simulated.html'))})
+output:
+  html_document:
+    df_print: paged
+    code_folding: show
+    toc: true
+    toc_float: true
+    toc_depth: 5
+    theme: united
+    highlight: tango
+    fig_width: 9
+    fig_height: 6
+---
+<details><summary>Setup</summary>
+```{r, setup, message=FALSE, warning = FALSE}
+# Install packages and functions
+ipak <- function(pkg) {
+  new.pkg <- pkg[!(pkg %in% installed.packages()[,"Package"])]
+  if (length(new.pkg)) {
+    install.packages(new.pkg, dependencies = TRUE)
+    cat("Not Installed:", paste(new.pkg, collapse = ", "), "\n")
+  } else {
+    cat("All Packages Installed :) \n")
+  }
+  invisible(sapply(pkg, require, character.only = TRUE))
+}
+
+packages <- c("tidyverse","here", "simDAG","brms","cmdstanr","dagitty","ggdag","ggdist","ggtext","scales")
+
+bayesplot::color_scheme_set("blue")                                     # Set color scheme
+options(mc.cores = parallel::detectCores())                             # Parallel Chains
+cmdstanr::set_cmdstan_path(path = "C:/Program Files/R/cmdstan-2.36.0")  # R-Stan
+ipak(packages)                                                          # Install packages
+```
+</details>
+
+# DAG
+```{r, echo = FALSE, fit.width = 16, fig.height= 4, out.width='100%'}
+# Create super basic DAG
+simple_dag <- dagify(
+  S ~ G + "T" + R + P + L + U,
+  P ~ G + L + R,
+  R ~ G + L,
+  L ~ G + "T",
+  
+  G ~ U,
+  R ~ U,
+  L ~ U,
+  
+  exposure = "G",
+  outcome = "S",
+  latent = "U",
+  coords = list(x = c(G = 1.6, "T" = 1.8, R = 2.1, S = 3, P = 2.6, L = 2.00, U = 1.7),
+                y = c(G = 2.0, "T" = 1.8, R = 2.35, S = 2, P = 1.7,  L = 2.10, U = 2.7))
+)
+
+dag_plot <- simple_dag |> 
+  tidy_dagitty() |> 
+  mutate(var_type = case_when(
+    name == "G" ~ "Exposure",
+    name == "S" ~ "Outcome",
+    str_detect(name, "U") ~ "Unmeasured",
+    str_detect(name, "T") ~ "var",
+    str_detect(name, "R") ~ "var",
+    str_detect(name, "L") ~ "var",
+    str_detect(name, "P") ~ "var"
+  ))
+
+ggplot(dag_plot, aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_dag_edges(edge_width = 0.7) +
+  geom_dag_point(aes(color = var_type), alpha = 1, size = 10) +
+  geom_richtext(
+    aes(label = name), fontface = "bold", color = "white", size = 4,
+    fill = NA, label.color = NA,
+    label.padding = grid::unit(c(3, 0, 0, 0), "pt")
+   ) + 
+  scale_color_manual(values = c("#882255","#6699CC","#44AA99", "grey50"), guide = "none") +
+  theme_dag()
+
+ggsave(here("Analysis/Output/Figures/Figure_1.png"), width = 8, height = 4, dpi = 600)
+```
+Figure 1: Directed acyclic graph of the hypothesised causal relationships related to salary: G = gender; S = salary; R = role type; L = level; T = time at the organisation; and P = percentage of FTE employed. The relationship of interest is between the exposure (red) and outcome (blue). The latent variable (green) is unmeasured. Arrows indicate the direction of hypothesised causal relationships.
+
+# Sim DAG
+```{r, warning = FALSE}
+# Simulate data from DAG
+dag <- empty_dag() +
+  
+  node("u", type = "rnorm", mean = 0, sd = 1) +                              # unmeasured confounder
+  node("years_since_start_date", type = "rnbinom", size = 10, prob = 0.5) +  # years since start date: a negative binomial distribution is used to ensure values are integers and positive
+  node("percentage", type="rbeta", shape1 = 5, shape2 = 0.5) +               # percentage FTE employed: a beta distribution is used to ensure values are between 0 and 1
+  
+  node("gender", 
+       type = "binomial", # A binomial distribution is used for gender (2-levels) for this minimal reproducible example.                                    
+       formula = ~ u,
+       betas = 0.5,       # Effect of unmeasured factor (positive = men advantaged)
+       intercept = 0) +   # Men:woman ratio (0 is 50:50 - positive increases men in organisation)  
+  
+  node("level",
+       type = "negative_binomial", # A negative binomial distribution is used for level to ensure values are integers and positive.
+       formula = ~ gender + years_since_start_date + u,
+       betas = c(0.005,  # Effect of level (i.e., if positive men are advantaged)
+                 0.01,   # Effect of years since start date
+                 0.01),  # Effect of unmeasured factor
+       theta = 3,
+       intercept = 0) +
+  
+    node("role_type", 
+       type = "binomial", # Role type is either one of 2-levels - support or research                                     
+       formula = ~ gender + level + u,
+       betas = c(0.1,      # Effect of gender (i.e, if positive men are advantaged in support roles) # Interaction
+                 0.1,      # Effect of level  (i.e, if positive then higher levels more likely to be in support roles)
+                 0.5),     # Effect of unmeasured factor on level
+       intercept = -0.9) + # research:support ratio (0 is 50:50 - negative indicates less people in support)
+
+  
+  node("salary", 
+       type = "gaussian", # Salary is continuous and normally distributed (although in practice this will probably be skewed)
+       formula = ~ gender + role_type + level + sqrt(years_since_start_date) + percentage + u, # Note the square root of years since start date is used to produce a non-linear relationship.
+       betas = c(4000,2000,5000,3000,2000,5000), # Betas are listed in order: e.g., $4000 is the organisational pay gap; $2000 is the difference between support and research roles.
+       intercept = 80000, 
+       error = 2000)
+
+# Set seed and simulate from DAG
+set.seed(42)
+sim_dat <-sim_from_dag(dag=dag, n_sim = 500)
+
+# Add interaction between gender and role type
+sim_dat <- sim_dat %>%
+  mutate(salary = case_when(
+    gender == "TRUE" & role_type == "TRUE"  ~ salary + 2000,
+    TRUE ~ salary))
+
+# Rename and tidy variables
+sim_dat <- sim_dat %>%
+  mutate(gender = ifelse(gender == "TRUE","man","woman")) %>%
+  mutate(role_type = ifelse(role_type == "TRUE","support","research")) %>%
+  mutate(percentage = round(percentage,2)) %>%
+  mutate(level = level + 1)
+
+# Reassign levels of gender
+sim_dat$gender <- factor(sim_dat$gender, levels = c("woman", "man"))
+```
+
+# Intervention 1
+```{r}
+# sim_dat %>% group_by(gender) %>% summarise(median = median(salary))
+# 101950.66	- 94763.87	= 7186.79
+
+# sim_dat <- sim_dat %>%
+#   mutate(salary = ifelse(gender == "woman",
+#                          salary + 7187, salary))
+```
+
+# Salary error measurement calculation
+```{r}
+# Define salary bands
+s <- c(50000, 60000, 70000, 80000, 90000, 100000, 120000, 140000, 160000, 200000)
+
+# Create labels for salary band bins
+labels <- c("below 50000", paste(head(s, -1), tail(s, -1), sep = "-"), "above 200000")
+
+# Function to find min and max of salary band
+find_bracket <- function(salary, breaks) {
+  bin <- cut(salary, breaks = c(-Inf, breaks, Inf), labels = labels, right = FALSE)
+  if (is.na(bin)) {
+    return(c(NA, NA))
+  } else {
+    bounds <- strsplit(as.character(bin), "-")[[1]]
+    return(as.numeric(bounds))
+  }
+}
+```
+
+# Intervention 2
+```{r}
+
+sim_dat <- sim_dat %>%
+ rowwise() %>%
+ mutate(
+   min = find_bracket(salary, s)[1],
+   max = find_bracket(salary, s)[2]) %>%
+  
+# Promote all women in research in level 1 to the next band 
+  
+# mutate(
+#   min = ifelse(gender == "woman" & role_type == "research" & level == 1,
+#                s[which(s > min)[1]],
+#                min),
+#   max = ifelse(gender == "woman" & role_type == "research" & level == 1, 
+#                s[which(s > min)[1] + 1],
+#                max)) %>%
+  
+ ungroup()
+```
+
+# Simulated data
+```{r}
+# Calculate salary estimate and standard deviation for error measurement model
+sim_dat <- sim_dat %>%
+  mutate(mid_est = (max + min) / 2) %>% # Calculate range mean
+  mutate(sd_val  = (max - min) / 4) %>% # Calculate approximate standard deviation
+  mutate(percentage_std = scale(percentage)) %>% # Scale percentage to aid model fitting
+  mutate(s_lab   = paste0(gender, role_type)) %>% # Define labels for spline
+  dplyr::select(c("u","gender","role_type","level","years_since_start_date","percentage_std","salary","min","max","mid_est","sd_val","s_lab")) # Select variables
+  
+head(sim_dat)
+```
+
+# Plot simulated data
+```{r, echo = FALSE, warning = FALSE}
+sim_dat %>%
+  mutate(level = as.factor(level)) %>%
+  mutate(gender = fct_recode(gender,"men" = "man", "women" = "woman")) %>%
+  mutate(lab = paste(gender, "in", role_type)) %>%
+   ggplot(aes(x = salary, fill = level)) + 
+    theme_classic() +
+     scale_fill_manual(values = c("#000000","#E69F00","#56B4E9","#009E73","#F0E442","#0072B2","#D55E00","#CC79A7","#999999")) +
+     scale_y_continuous(limits = c(0,50), breaks = seq(0,50,10)) +
+     scale_x_continuous(breaks = seq(70000, 150000, 20000), 
+                     labels = function(x) paste0("$", format(x, big.mark = ","))) +
+  geom_vline(xintercept = c(70000,80000,90000,100000,120000,140000), linetype = "dashed", color = "grey") +
+  geom_histogram(binwidth = 5000, alpha = 0.8, color = "grey80", position = "stack") +
+   annotate("segment", x = 71000 , xend = 79000, y = 50, yend = 50, color = "grey", size = 0.1, 
+           arrow = arrow(length = unit(0.15, "cm"), ends = "both", type = "closed")) +
+   annotate("segment", x = 81000 , xend = 89000, y = 50, yend = 50, color = "grey", size = 0.1, 
+           arrow = arrow(length = unit(0.15, "cm"), ends = "both", type = "closed")) +
+   annotate("segment", x = 91000 , xend = 99000, y = 50, yend = 50, color = "grey", size = 0.1, 
+           arrow = arrow(length = unit(0.15, "cm"), ends = "both", type = "closed")) +
+   annotate("segment", x = 101000 , xend = 119000, y = 50, yend = 50, color = "grey", size = 0.1, 
+           arrow = arrow(length = unit(0.15, "cm"), ends = "both", type = "closed")) +
+   annotate("segment", x = 121000 , xend = 139000, y = 50, yend = 50, color = "grey", size = 0.1, 
+           arrow = arrow(length = unit(0.15, "cm"), ends = "both", type = "closed")) +  
+  guides(fill = guide_legend(title = "Level", reverse = TRUE)) +
+  ylab("Count") + xlab("Salary") +
+  facet_wrap(~lab)
+
+ggsave(here("Analysis/Output/Figures/Figure_2.png"), width = 8, height = 4, dpi = 600)
+```
+
+# Error measurement model
+```{r}
+# Model formula
+mod_formula <- bf(
+   mid_est | se(sd_val, sigma = TRUE) ~ 0 + Intercept + gender * role_type + mo(level) + percentage_std + # u +
+    s(years_since_start_date, by = s_lab) # Spline as non-linear
+  )
+
+# Priors
+priors <- c(
+  prior(normal(100000, 50000), class = b, coef = Intercept),
+  prior(normal(0, 10000), class = b)
+)
+
+mod <- brm(
+  mod_formula,  
+  family = gaussian(link = "identity"),
+  prior = priors,
+  data = sim_dat,  
+  threads = threading(threads = NULL, grainsize = 1250, static = FALSE),
+  backend = "cmdstanr", 
+  silent = 0,
+  refresh = 2000,
+  chains = 4, 
+  cores = 4, 
+  warmup = 1000, 
+  iter = 2000,
+  file = paste0(here("Analysis/Output/Models/Sims/A4.mod.error.measurement.s42.n500"))
+)
+
+# The 0 + Intercept syntax is used since variables are not centered or scaled - this ensures priors are implemented correctly.
+# u is the confounding variable: if included the estimates are not confounded since the model has information on how the confounding occurs
+```
+
+# References
+
+Bürkner, P.C., (2017). brms: An R Package for Bayesian Multilevel Models Using Stan. Journal of Statistical Software, 80(1), 1-28. <https://econpapers.repec.org/article/jssjstsof/v_3a080_3ai01.htm>
+
+McElreath, R. (2020). Statistical rethinking: A Bayesian course with examples in R and Stan. Chapman and Hall/CRC.
+
+R Core Team (2022). R: A language and environment for statistical computing. R Foundation for Statistical Computing, Vienna, Austria. <https://www.R-project.org/>
+
+<details><summary>Session Information</summary>
+```{r}
+utils::sessionInfo()
+```
+</details>

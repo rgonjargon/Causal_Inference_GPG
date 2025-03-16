@@ -1,0 +1,335 @@
+---
+title: "Simulated report - GPG"
+author: "Dr Tom Moore - Statistical Scientist"
+date:  '`r Sys.Date()`'
+knit: (function(inputFile, encoding) { out_dir <- "Reports";
+      rmarkdown::render(inputFile, encoding=encoding, output_file=file.path(dirname(inputFile),
+      out_dir, 'Simulated_analysis_report.html'))})
+output:
+  html_document:
+    df_print: paged
+    code_folding: show
+    toc: true
+    toc_float: true
+    toc_depth: 5
+    theme: united
+    highlight: tango
+    fig_width: 9
+    fig_height: 6
+---
+<details><summary>Setup</summary>
+```{r, setup, message=FALSE, warning = FALSE}
+# Install packages and functions
+ipak <- function(pkg) {
+  new.pkg <- pkg[!(pkg %in% installed.packages()[,"Package"])]
+  if (length(new.pkg)) {
+    install.packages(new.pkg, dependencies = TRUE)
+    cat("Not Installed:", paste(new.pkg, collapse = ", "), "\n")
+  } else {
+    cat("All Packages Installed :) \n")
+  }
+  invisible(sapply(pkg, require, character.only = TRUE))
+}
+
+packages <- c("tidyverse","here", "simDAG","brms","cmdstanr","dagitty","ggdag","ggdist","ggtext","scales")
+
+bayesplot::color_scheme_set("blue")                                     # Set color scheme
+options(mc.cores = parallel::detectCores())                             # Parallel Chains
+cmdstanr::set_cmdstan_path(path = "C:/Program Files/R/cmdstan-2.36.0")  # R-Stan
+ipak(packages)                                                          # Install packages
+```
+</details>
+
+# Introduction
+
+The aim of this analysis is to report the gender pay gap across an entire workforce and identify areas where this gap is most pronounced. To estimate the gender pay gap other variables known to influence salary (i.e., role type (support/research), time since working at an organisation, level in the organisation, and percentage of FTE employed) were measured and accounted for statistically using a causal inference framework. 
+
+# Methods:
+
+For modeling, salary was treated as the mean of the corresponding range (i.e., (range maximum + range minimum) / 2) with an approximated standard deviation to represent measurement error (i.e., range maximum - range minimum / 4).
+
+Measurement error models (one for each year) predicted salary with measurement error based on gender, role type, and level (monotonic predictor) (interactions specified), as well as percentage employed and days since employment start date (fitted as splines). The random effect was position nested within team nested within site location, with random intercepts for gender and role type (correlated). A skew normal distribution was selected to account for positively skewed salary data. Weakly informative priors were used to aid model convergence for the intercept and slope parameters (see models). This model was performed in R (R Core Team 2022) using the brms package (Bürkner, 2017) with ideas inspired from (McElreath, 2020).
+
+## Analysis
+### Measurement error model
+<details><summary>Models</summary>
+```{r}
+# Read in all simulations
+mods <- lapply(list.files(
+  path = here("Analysis/Output/Models/Sims"), 
+  pattern = "\\.rds$", 
+  full.names = TRUE),
+  readRDS)
+
+# Select model by index
+mod <- mods[[4]] # Select A4 model [[4]]
+```
+
+</details><details><summary>Validation</summary>
+```{r, echo = FALSE}
+plot(mod)      # Chain mixing diagnostic
+pp_check(mod)  # Posterior predictive check
+```
+</details><details><summary>Output</summary>
+```{r}
+summary(mod)   # Summary of model 
+```
+</details>
+
+## Plots
+```{r, echo = FALSE, fig.width= 8, fig.height= 4, fig.cap='Figure 2: Conditional effect of gender and role type on salary. Esimates are displayed as intervals (mean (black dot) with 95 % credible interval (range)) and labeled as text. Verticle lines display average estimates: women in research (red); women in support (dark red); men in research (blue); men in support (purple).'}
+# Custom conditional effect plots
+c_eff_1 <- conditional_effects(mod, effect = "gender:role_type")[[1]] %>%
+  mutate(gender = fct_recode(gender, "Men" = "man", "Women" = "woman"),
+         role_type = fct_recode(role_type, "Research" = "research", "Support" = "support"))
+
+ggplot(c_eff_1, aes(x = role_type, y = estimate__, ymin = lower__, ymax = upper__)) + 
+       geom_hline(yintercept = c_eff_1$estimate__[1], alpha = 0.4, linewidth = 3, color = "#56B4E9") +
+       geom_hline(yintercept = c_eff_1$estimate__[2], alpha = 0.4, linewidth = 3, color = "#D55E00") +
+       geom_hline(yintercept = c_eff_1$estimate__[3], alpha = 0.4, linewidth = 3, color = "#009E73") +
+       geom_hline(yintercept = c_eff_1$estimate__[4], alpha = 0.4, linewidth = 3, color = "#CC79A7") +
+      geom_pointinterval(size = 8, alpha = 0.8) +
+      theme_bw() +
+      coord_flip() +
+      geom_text(data = mutate_if(c_eff_1, is.numeric, signif, 3),
+      aes(label = glue::glue("${estimate__} (95% CI [${lower__}, ${upper__}])"), x = role_type), hjust = "inward", size = 3.5, y = 120000) +
+      scale_y_continuous(limits = c(90000, 120000), breaks = seq(90000, 120000, 5000), labels = function(x) paste0("$", format(x, big.mark = ","))) +
+      labs(y = "Salary", x = "") +
+      facet_wrap(~ gender, ncol = 1)
+
+ggsave(here("Analysis/Output/Figures/Figure_3.png"), width = 8, height = 4, dpi = 600)
+```
+
+```{r, echo = FALSE, fig.width= 8, fig.height= 4, fig.cap='Figure 3: Conditional effect of gender and role type across levels: women in research (red); women in support (dark red); men in research (blue); men in support (purple). Level 1 employees are 4 steps removed from the CEO and level 5 employees are those who only have the CEO as a line manager.'}
+c_eff_2 <- conditional_effects(mod, effects = "level:gender", conditions = data.frame(role_type = c("research","support")))[[1]] %>%
+   mutate(s_lab = case_when(
+     gender == "woman" & role_type == "research" ~ "Women in research",
+     gender == "woman" & role_type == "support"  ~ "Women in support",
+     gender == "man"   & role_type == "research" ~ "Men in research",
+     gender == "man"   & role_type == "support"  ~ "Men in support",
+     TRUE ~ NA_character_
+   ),
+   role_type = fct_recode(role_type, "Research" = "research", "Support" = "support")
+  )
+
+ggplot(c_eff_2, aes(x = effect1__, y = estimate__, ymin = lower__, ymax = upper__, color = s_lab)) + 
+      theme_bw() +    
+      theme(legend.position="bottom") +
+      geom_pointinterval(size = 8, alpha = 0.5, position = position_dodge(width = 0.8)) +
+      scale_color_manual(values = c("#009E73","#CC79A7","#56B4E9","#D55E00")) +
+       scale_x_continuous(limits = c(0,8), breaks = seq(1,7,1)) +
+       scale_y_continuous(limits = c(85000, 136000), breaks = seq(50000, 130000, 10000), labels = function(x) paste0("$", format(x, big.mark = ","))) +
+      labs(x = "Level" , y = "Salary") +
+      guides(color = guide_legend(title = "Gender and role type")) +
+      facet_wrap(~role_type, ncol = 2)
+
+ggsave(here("Analysis/Output/Figures/Figure_4.png"), width = 8, height = 4, dpi = 600)
+```
+
+```{r, echo = FALSE, fig.width= 8, fig.height= 4,  warning = FALSE, fig.cap='Figure 4: Conditional effect of gender and role type on salary over time. Esimates are displayed as intervals (mean (dot) with 95 % credible interval (range)): women in research (red); women in support (dark red); men in research (blue); men in support (purple).'}
+c_eff_3 <- conditional_effects(mod, effect = "years_since_start_date:s_lab")[[1]] %>%
+   mutate(s_lab = case_when(
+     s_lab == "manresearch" ~ "Men in research",
+     s_lab == "mansupport" ~ "Men in support",
+     s_lab == "womanresearch" ~ "Women in research",
+     s_lab == "womansupport" ~ "Women in support",
+     TRUE ~ NA_character_
+   )
+  )
+
+ggplot(c_eff_3, aes(x = years_since_start_date, y = estimate__, ymin = lower__, ymax = upper__, fill = s_lab, color = s_lab)) + 
+      theme_bw() +    
+      theme(legend.position="none") +
+      geom_ribbon(alpha = 0.2) +
+      geom_line(color = "black") +
+      scale_fill_manual(values = c("#009E73","#CC79A7","#56B4E9" ,"#D55E00" )) +
+      scale_color_manual(values = c("#009E73","#CC79A7","#56B4E9" ,"#D55E00" )) +
+      scale_x_continuous(limits = c(0,27), breaks = seq(0,30,5)) +
+      scale_y_continuous(limits = c(80000, 110000), breaks = seq(40000, 110000, 10000), labels = function(x) paste0("$", format(x, big.mark = ","))) +
+      labs(x = "Years of employment" , y = "Salary") +
+      facet_wrap(~s_lab, ncol = 2)
+
+ggsave(here("Analysis/Output/Figures/Figure_5.png"), width = 8, height = 4, dpi = 600)
+```
+
+```{r, echo = FALSE, fig.width= 8, fig.height= 4,  warning = FALSE, fig.cap='Figure 5: Conditional effect of percent FTE on salary over time. Esimates are displayed as intervals (mean (dot) with 95 % credible interval (range)): women in research (red); and women in support (dark red).'}
+c_eff_4a <- conditional_effects(mod, effects = "years_since_start_date", 
+                               conditions = data.frame(s_lab = "womansupport",  percentage_std = c(0.4,-1,-2.5,-4)))[[1]] # 100,80,60,40%
+
+c_eff_4b <- conditional_effects(mod, effects = "years_since_start_date", 
+                               conditions = data.frame(s_lab = "womanresearch", percentage_std = c(0.4,-1,-2.5,-4)))[[1]] # 100,80,60,40%
+
+c_eff_4a <- c_eff_4a %>%
+        mutate(percentage_std_f = as.factor(percentage_std)) %>%
+        mutate(f_lab = "Women in support")
+
+c_eff_4a$percentage_std_f <- fct_recode(c_eff_4a$percentage_std_f,
+                                       "100%" = "0.4",
+                                       "80%"  = "-1",
+                                       "60%"  = "-2.5",
+                                       "40%"  = "-4")
+
+c_eff_4a$percentage_std_f <- fct_relevel(c_eff_4a$percentage_std_f, "100%","80%","60%","40%")
+
+c_eff_4b <- c_eff_4b %>%
+        mutate(percentage_std_f = as.factor(percentage_std)) %>%
+        mutate(f_lab = "Women in research")
+
+c_eff_4b$percentage_std_f <- fct_recode(c_eff_4b$percentage_std_f,
+                                       "100%" = "0.4",
+                                       "80%"  = "-1",
+                                       "60%"  = "-2.5",
+                                       "40%"  = "-4")
+
+c_eff_4b$percentage_std_f <- fct_relevel(c_eff_4b$percentage_std_f, "100%","80%","60%","40%")
+
+p1 <- ggplot(c_eff_4a, aes(x = years_since_start_date, y = estimate__, ymin = lower__, ymax = upper__, fill = percentage_std_f, color = percentage_std_f)) + 
+      theme_bw() +    
+    theme(legend.position="bottom",legend.text = element_text(size=8),legend.title = element_text(size=8),legend.key.width = unit(0.2, 'cm')) +
+      geom_ribbon(alpha = 0.1, color = NA) +
+      geom_line() +
+      scale_fill_manual(values = c("red","darkorange","black","grey20")) +
+      scale_color_manual(values = c("red","darkorange","black","grey20")) +
+      scale_x_continuous(limits = c(0,27), breaks = seq(0,30,5)) +
+      scale_y_continuous(limits = c(80000, 110000), breaks = seq(40000, 110000, 5000), labels = function(x) paste0("$", format(x, big.mark = ","))) +
+      guides(color=guide_legend(title="Percentage FTE"), fill = "none") +
+      labs(x = "Years of employment" , y = "Salary")  +
+      facet_wrap(~f_lab, ncol = 1)
+
+p2 <- ggplot(c_eff_4b, aes(x = years_since_start_date, y = estimate__, ymin = lower__, ymax = upper__, fill = percentage_std_f, color = percentage_std_f)) + 
+      theme_bw() +    
+   theme(legend.position="bottom",legend.text = element_text(size=8),legend.title = element_text(size=8),legend.key.width = unit(0.2, 'cm')) +
+      geom_ribbon(alpha = 0.1, color = NA) +
+      geom_line() +
+      scale_fill_manual(values = c("darkred","darkorange","black","grey20")) +
+      scale_color_manual(values = c("darkred","darkorange","black","grey20")) +
+      scale_x_continuous(limits = c(0,27), breaks = seq(0,30,5)) +
+      scale_y_continuous(limits = c(80000, 110000), breaks = seq(40000, 110000, 5000), labels = function(x) paste0("$", format(x, big.mark = ","))) +
+      guides(color=guide_legend(title="Percentage FTE"), fill = "none") +
+      labs(x = "Years of employment " , y = "Salary")  +
+      facet_wrap(~f_lab, ncol = 1)
+
+p <- cowplot::plot_grid(p1,p2, ncol = 2)
+p
+
+ggsave(here("Analysis/Output/Figures/Figure_6.png"), width = 8, height = 4, dpi = 600)
+```
+
+### Hypotheses
+<details><summary>Hypotheses</summary>
+
+```{r}
+# Overall gender pay gap $
+a <- hypothesis(mod, 'genderman > 0') 
+# How much more do men in support earn than woman in support?
+b <- hypothesis(mod, '(Intercept + role_typesupport + genderman + genderman:role_typesupport) - (Intercept + role_typesupport) > 0') 
+# How much more do men in research earn than women in research?
+c <- hypothesis(mod, '(Intercept + genderman) - (Intercept) > 0') 
+# What is the difference between men in support and men in research?
+d <- hypothesis(mod, '(Intercept + role_typesupport + genderman +  genderman:role_typesupport) - (Intercept + genderman) > 0') 
+ # What is the difference between women in support and women in research?
+e <- hypothesis(mod, '(Intercept + role_typesupport) - (Intercept) > 0')
+# What is the difference between men in support and women in research
+f <- hypothesis(mod, '(Intercept + role_typesupport + genderman + genderman:role_typesupport) - (Intercept) > 0') 
+```
+</details><details><summary>Outputs</summary>
+
+```{r}
+a$hypothesis$Estimate
+b$hypothesis$Estimate
+c$hypothesis$Estimate
+d$hypothesis$Estimate
+e$hypothesis$Estimate
+f$hypothesis$Estimate
+```
+
+</details>
+
+```{r, echo=FALSE, message=FALSE, fig.show='hold',out.width='92.5%', fig.width = 7.5, fig.height = 5}
+p.a <- 
+  ggplot(a[[2]], aes(x = H1, fill = after_stat(abs(x) < 0))) +
+  theme_bw() +
+  stat_halfeye(fill = "#999999", alpha = 0.5, size = 5) +
+  scale_y_continuous(limits = c(-0.1,1)) +
+  scale_x_continuous(limits = c(0,12500), breaks = seq(0,12000,3000), labels = function(x) paste0("$", format(x, big.mark = ","))) +
+  theme(legend.position="none", axis.text.y = element_blank(), axis.line.y = element_blank(), axis.ticks.y = element_blank(), 
+        plot.title = element_text(size = 12), axis.text.x = element_text(size = 12)) +
+  xlab("") + ylab ("") + labs(title = paste0("H1: On average men earn more \n       than women by $", format(signif(mean(a[[2]]$H1),3), big.mark = ",")), size = 20) +
+  geom_vline(xintercept = 0 , linetype = "dashed")
+
+p.b <-
+  ggplot(b[[2]], aes(x = H1, fill = after_stat(abs(x) < 0))) +
+  theme_bw() +
+  stat_halfeye(fill = "#999999", alpha = 0.5, size = 5) +
+  scale_y_continuous(limits = c(-0.1,1)) +
+  scale_x_continuous(limits = c(0,12500), breaks = seq(0,12000,3000), labels = function(x) paste0("$", format(x, big.mark = ","))) +
+  theme(legend.position="none", axis.text.y = element_blank(), axis.line.y = element_blank(), axis.ticks.y = element_blank(), 
+        plot.title = element_text(size = 12), axis.text.x = element_text(size = 12)) +
+  xlab("") + ylab ("") + labs(title = paste0("H2: On average men in support earn more \n       than women in support by $", format(signif(mean(b[[2]]$H1),3), big.mark = ",")), size = 20) +
+  geom_vline(xintercept = 0 , linetype = "dashed")
+
+p.c <-
+  ggplot(c[[2]], aes(x = H1, fill = after_stat(abs(x) < 0))) +
+  theme_bw() +
+  stat_halfeye(fill = "#999999", alpha = 0.5, size = 5) +
+  scale_y_continuous(limits = c(-0.1,1)) +
+  scale_x_continuous(limits = c(0,12500), breaks = seq(0,12000,3000), labels = function(x) paste0("$", format(x, big.mark = ","))) +
+  theme(legend.position="none", axis.text.y = element_blank(), axis.line.y = element_blank(), axis.ticks.y = element_blank(), 
+        plot.title = element_text(size = 12), axis.text.x = element_text(size = 12)) +
+  xlab("") + ylab ("") + labs(title = paste0("H3: On average men in research earn more \n       than women in research by $", format(signif(mean(c[[2]]$H1),3), big.mark = ",")), size = 20) +
+  geom_vline(xintercept = 0 , linetype = "dashed")
+
+p.d <-
+  ggplot(d[[2]], aes(x = H1, fill = after_stat(abs(x) < 0))) +
+  theme_bw() +
+  scale_y_continuous(limits = c(-0.1,1)) +
+  stat_halfeye(fill = "#999999", alpha = 0.5, size = 5) +
+  scale_x_continuous(limits = c(0,12500), breaks = seq(0,12000,3000), labels = function(x) paste0("$", format(x, big.mark = ","))) +
+  theme(legend.position="none", axis.text.y = element_blank(), axis.line.y = element_blank(), axis.ticks.y = element_blank(), 
+        plot.title = element_text(size = 12), axis.text.x = element_text(size = 12)) +
+  xlab("") + ylab ("") + labs(title = paste0("H4: On average men in support earn more \n       than men in research by $", format(signif(mean(d[[2]]$H1),3), big.mark = ",")), size = 20) +
+  geom_vline(xintercept = 0 , linetype = "dashed")
+
+p.e <-
+ggplot(e[[2]], aes(x = H1, fill = after_stat(abs(x) < 0))) +
+  theme_bw() +
+  stat_halfeye(fill = "#999999", alpha = 0.5, size = 5) +
+  scale_y_continuous(limits = c(-0.1,1)) +
+  scale_x_continuous(limits = c(0,12500), breaks = seq(0,12000,3000), labels = function(x) paste0("$", format(x, big.mark = ","))) +
+  theme(legend.position="none", axis.text.y = element_blank(), axis.line.y = element_blank(), axis.ticks.y = element_blank(), 
+        plot.title = element_text(size = 12), axis.text.x = element_text(size = 12)) +
+  xlab("") + ylab ("") + labs(title = paste0("H5: On average women in support earn more \n       than women in research by $", format(signif(mean(e[[2]]$H1),3), big.mark = ",")), size = 20) +
+  geom_vline(xintercept = 0 , linetype = "dashed")
+
+p.f <-
+ggplot(f[[2]], aes(x = H1, fill = after_stat(abs(x) < 0))) +
+  theme_bw() +
+  stat_halfeye(fill = "#999999", alpha = 0.5) +
+  scale_y_continuous(limits = c(-0.1,1)) +
+  scale_x_continuous(limits = c(0,12500), breaks = seq(0,12000,3000), labels = function(x) paste0("$", format(x, big.mark = ","))) +
+  theme(legend.position="none", axis.text.y = element_blank(), axis.line.y = element_blank(), axis.ticks.y = element_blank(), 
+        plot.title = element_text(size = 12), axis.text.x = element_text(size = 12)) +
+  xlab("") + ylab ("") + labs(title = paste0("H6: On average men in support earn more \n       than women in research by $", format(signif(mean(f[[2]]$H1),3), big.mark = ",")), size = 20) +
+  geom_vline(xintercept = 0 , linetype = "dashed")
+
+cowplot::plot_grid(p.a, p.b, p.c, p.d, p.e, p.f, ncol = 2)
+
+ggsave(here("Analysis/Output/Figures/Figure_7.png"), width = 7.5, height = 5, dpi = 600)
+```
+
+# References
+
+Blevins, C., & Mullen, L. (2015). Jane, John... Leslie? A Historical Method for Algorithmic Gender Prediction. DHQ: Digital Humanities Quarterly, 9(3). <http://www.digitalhumanities.org/dhq/vol/9/3/000223/000223.html>
+
+Bürkner, P.C., (2017). brms: An R Package for Bayesian Multilevel Models Using Stan. Journal of Statistical Software, 80(1), 1-28. <https://econpapers.repec.org/article/jssjstsof/v_3a080_3ai01.htm>
+
+McElreath, R. (2020). Statistical rethinking: A Bayesian course with examples in R and Stan. Chapman and Hall/CRC.
+
+R Core Team (2022). R: A language and environment for statistical computing. R Foundation for Statistical Computing, Vienna, Austria. <https://www.R-project.org/>
+
+<details><summary>Session Information</summary>
+```{r}
+utils::sessionInfo()
+```
+</details>
+
