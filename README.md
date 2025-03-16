@@ -1,1 +1,1 @@
-Project Code for the GPG Manuscript. The scripts folder contains the data simulation and report compilation R markdown files that are output to the Reports folder. The analysis folder contains all model simulation outputs and figures. 
+Project Code for the GPG Manuscript. The "0_simulation.Rmd" and "1_sim_analysis.Rmd" files complie reports to the Reports folder and model simulations and figures to the analysis folder.
